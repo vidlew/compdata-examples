@@ -25,7 +25,7 @@ import qualified Data.Comp.Show as C
 import Data.Kind
 
 type Tag = Int
-newtype Val (a :: Type -> Type) (b :: Type) = Val {getVal :: Int}
+data Val (a :: Type -> Type) (b :: Type) where Val :: Int -> Val a Int
 data Pair a b where Pair :: a i -> a j -> Pair a (i,j)
 data Add a b where Add :: a i -> a i -> Add a i
 data Mult a b where Mult :: a i -> a i -> Mult a i
