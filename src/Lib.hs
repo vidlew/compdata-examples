@@ -13,6 +13,7 @@
 module Lib where
 
 import Control.Monad.State
+import Control.Monad (when)
 import Data.Maybe (isJust)
 import Data.Typeable
 import Data.GADT.Compare
@@ -30,6 +31,7 @@ import qualified Data.Comp as C
 import qualified Data.Comp.Ops as C
 import qualified Data.Comp.Show as C
 import qualified Data.Comp.Dag as C
+import qualified Data.IntMap as I
 import Data.Kind
 import Unsafe.Coerce
 
@@ -87,7 +89,7 @@ hasLet Dag' {root', edges'} = case proj @Var root' of
                                 Nothing ->
                                     any isJust . fmap (\(_ S.:=> a) -> void $ proj @Var a) $ M.toList edges'
 
-removeLet :: forall f i . Var :<: f => Dag' f i -> Dag' f i
+removeLet :: forall f i . (HTraversable f, Var :<: f) => Dag' f i -> Dag' f i
 removeLet Dag' {root', edges'} = let
                   e' = M.toList edges'
                   r = case proj @Var root' of
@@ -112,7 +114,24 @@ removeLet Dag' {root', edges'} = let
                                                     put (M.insert (Node i) a m, tab)
                   (eFinal, _) = execState (mapM_ run e') (M.empty, initTab)
                   d = Dag' r eFinal . length $ M.toList eFinal
-                in if hasLet d then removeLet d else d
+                in if hasLet d then removeLet d else relabel d
+
+-- | Relabel edges and remove unreachable nodes.
+relabel :: HTraversable f => Dag' f i -> Dag' f i
+relabel Dag' {root', edges'} = Dag' r' (M.fromList e') $ length e' where
+    start = execState (addNodes root') (0, I.empty)
+    e = M.toList edges'
+    addNode (Node n) = do (m, labels) <- get
+                          if n `I.member` labels then return () else
+                                             put (m+1, I.insert n m labels)
+                          return $ K ()
+    addNodes = hmapM addNode
+    (_, nodeMap) = fix' (execState (mapM (\(Node l S.:=> x) -> do {(_,ls) <- get; when (I.member l ls) . void $ addNodes x}) e)) start
+    fix' f i = if i == f i then i else fix' f $ f i
+    r' = hfmap (\(Node n) -> Node (nodeMap I.! n)) root'
+    e' = do Node n S.:=> x <- e
+            if n `I.member` nodeMap then return $ Node (nodeMap I.! n) S.:=> hfmap (\(Node j) -> Node $ nodeMap I.! j) x
+                                  else []
 
 type Sig = Val :+: Pair :+: Add :+: Mult :+: Var
 
