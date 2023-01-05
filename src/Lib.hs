@@ -155,3 +155,8 @@ matchPattern Dag' {root', edges', nodeCount'} =  if hasPattern t then matchPatte
 $(derive [makeHFunctor, makeShowHF, makeHTraversable, makeHFoldable, smartAConstructors, smartConstructors]
             [''Val, ''Pair, ''Add, ''Mult, ''Var, ''ProductOfSums])
 
+instance (Val :<: f, Add :<: f, Mult :<: f) => Num (Term f Int) where
+    fromInteger = iVal . fromInteger
+    (+) = iAdd
+    (*) = iMult
+
