@@ -14,7 +14,7 @@ module Lib where
 
 import Control.Monad.State
 import Control.Monad (when)
-import Data.Maybe (isJust, fromJust)
+import Data.Maybe (isJust, fromMaybe)
 import Data.Typeable
 import Data.GADT.Compare
 import Data.Comp.Multi
@@ -135,11 +135,22 @@ type Sig = Val :+: Pair :+: Add :+: Mult :+: Var
 -- |ProductOfSums x y z w represents (x+y)*(z+w).
 data ProductOfSums a b where ProductOfSums :: a b -> a b -> a b -> a b -> ProductOfSums a b
 
-hasPattern :: (Add :<: f, Mult :<: f) => Dag' f :=> Bool
-hasPattern Dag' {root', edges'} = undefined
+hasPattern :: forall f . (Add :<: f, Mult :<: f) => Dag' f :=> Bool
+hasPattern Dag' {root', edges'} = match root' || any (\(_ S.:=> x) -> match x) (M.toList edges') where
+                                                  match :: f Node :=> Bool
+                                                  match f = case proj @Mult f of Nothing -> False
+                                                                                 Just (Mult x@(Node _) y@(Node _)) -> fromMaybe False $ do Add _ _ <- proj $ edges' M.! x
+                                                                                                                                           Add _ _ <- proj $ edges' M.! y
+                                                                                                                                           return True
 
-matchPattern :: (Add :<: f, Mult :<: f, ProductOfSums :<: f) => Dag' f :-> Dag' f
-matchPattern Dag' {root', edges', nodeCount'} = undefined
+matchPattern :: forall f . (HTraversable f, Add :<: f, Mult :<: f, ProductOfSums :<: f) => Dag' f :-> Dag' f
+matchPattern Dag' {root', edges', nodeCount'} =  if hasPattern t then matchPattern t else t where
+                                                  t = relabel $ Dag' {root' = match root', edges' = M.fromList . fmap (\(n S.:=> x) -> n S.:=> match x) $ M.toList edges', nodeCount' = nodeCount'}
+                                                  match :: f Node :-> f Node
+                                                  match f = case proj @Mult f of Nothing -> f
+                                                                                 Just (Mult x@(Node _) y@(Node _)) -> fromMaybe f $ do Add a b <- proj $ edges' M.! x
+                                                                                                                                       Add c d <- proj $ edges' M.! y
+                                                                                                                                       return . inj $ ProductOfSums a b c d
 
 $(derive [makeHFunctor, makeShowHF, makeHTraversable, makeHFoldable, smartAConstructors, smartConstructors]
             [''Val, ''Pair, ''Add, ''Mult, ''Var, ''ProductOfSums])
