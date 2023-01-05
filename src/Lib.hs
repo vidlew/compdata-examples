@@ -14,7 +14,7 @@ module Lib where
 
 import Control.Monad.State
 import Control.Monad (when)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, fromJust)
 import Data.Typeable
 import Data.GADT.Compare
 import Data.Comp.Multi
@@ -84,37 +84,34 @@ instance HFgeq Var where
     _ `hfgeq` _ = Nothing
 
 hasLet :: (Var :<: f) => Dag' f i -> Bool
-hasLet Dag' {root', edges'} = case proj @Var root' of
-                                Just _ -> True
-                                Nothing ->
-                                    any isJust . fmap (\(_ S.:=> a) -> void $ proj @Var a) $ M.toList edges'
+hasLet Dag' {root', edges'} = isJust (proj @Var root') || (any isJust . fmap (\(_ S.:=> a) -> void $ proj @Var a) $ M.toList edges')
 
+-- remove all let bindings, assuming all variables have unique tags and are only bound once in the expression and only used within their scope
+-- extremely ugly but seems to work
 removeLet :: forall f i . (HTraversable f, Var :<: f) => Dag' f i -> Dag' f i
-removeLet Dag' {root', edges'} = let
-                  e' = M.toList edges'
-                  r = case proj @Var root' of
-                        Just (Let _ _ expr) -> edges' M.! expr
-                        Just (Var _       ) -> error "Free variable at top level, this should not happen"
-                        Nothing             -> root'
-                  initTab = case proj @Var root' of
-                        Just (Let v sub _) -> M.singleton v $ edges' M.! sub
-                        Just (Var _)       -> error "Free variable at top level, this should not happen"
-                        Nothing            -> M.empty
-                  run :: S.DSum Node (f Node) -> State (M.DMap Node (f Node), M.DMap Tag (f Node)) ()
-                  run (Node i S.:=> a) =
-                      case proj @Var a of
-                        Just (Let v sub expr) -> do (m, tab) <- get
-                                                    let m' = M.insert (Node i) (edges' M.! expr) m
-                                                    let tab' = M.insert v (edges' M.! sub) tab
-                                                    put (m', tab')
-                        Just (Var v)          -> do (m, tab) <- get
-                                                    let m' = M.insert (Node i) (tab M.! v) m
-                                                    put (m', tab)
-                        Nothing               -> do (m, tab) <- get
-                                                    put (M.insert (Node i) a m, tab)
-                  (eFinal, _) = execState (mapM_ run e') (M.empty, initTab)
-                  d = Dag' r eFinal . length $ M.toList eFinal
-                in if hasLet d then removeLet d else relabel d
+removeLet Dag' {root', edges'} = if hasLet d then removeLet d else d where
+                                    d = relabel $ Dag' {root' = hfmap replaceTag newRoot, edges' = M.fromList edgesFinal, nodeCount' = length edgesFinal}
+                                    -- construct mapping from tags to nodes
+                                    initMap :: M.DMap Tag Node
+                                    initIndex :: Int
+                                    initEdges :: M.DMap Node (f Node)
+                                    newRoot :: f Node i
+                                    (initMap, initIndex, initEdges, newRoot) = case proj @Var root' of Just (Var _)             -> error "Free variable at top level."
+                                                                                                       Just (Let v@(Tag _) s e) -> (M.singleton v $ Node initIndex,
+                                                                                                                                    (1+) . foldr max 0 . fmap (\(Node n S.:=> _) -> n) $ M.toList edges',
+                                                                                                                                    M.insert (Node initIndex) (edges' M.! s) edges',
+                                                                                                                                    edges' M.! e)
+                                                                                                       Nothing                  -> (M.empty,
+                                                                                                                                    foldr max 0 . fmap (\(Node n S.:=> _) -> n) $ M.toList edges',
+                                                                                                                                    edges',
+                                                                                                                                    root')
+                                    updateMap (n@(Node _) S.:=> x) = case proj @Var x of Just (Let v@(Tag _) s e) -> modify $ \ (varmap, index, edgemap) -> (M.insert v (Node $ index+1) varmap, index+1, M.insert (Node $ index+1) (edges' M.! s) $ M.adjust (const $ edgemap M.! e) n edgemap)
+                                                                                         _                        -> return ()
+                                    (tagMap, _, newEdges) = execState (traverse updateMap (M.toList edges')) (initMap, initIndex, initEdges)
+                                    replaceTag :: forall x . Node x -> Node x
+                                    replaceTag n@(Node _) = case proj @Var $ newEdges M.! n of Just (Var x@(Tag _)) -> tagMap M.! x
+                                                                                               _ -> n
+                                    edgesFinal = (\(a S.:=> b) -> a S.:=> hfmap replaceTag b) <$> M.toList newEdges
 
 -- | Relabel edges and remove unreachable nodes.
 relabel :: HTraversable f => Dag' f i -> Dag' f i
