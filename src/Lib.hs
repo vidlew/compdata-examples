@@ -10,6 +10,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE NamedFieldPuns #-}
+
+{-# LANGUAGE NoMonomorphismRestriction #-}
 module Lib where
 
 import Control.Monad.State
@@ -25,6 +27,8 @@ import Data.Comp.Multi.HFoldable
 import Data.Comp.Multi.HTraversable
 import Data.Comp.Multi.LowerOrder
 import Data.Comp.Multi.Dag
+import qualified Data.Comp.Multi.Dag.AG as AG
+import Data.Comp.Projection
 import qualified Data.Dependent.Sum as S
 import qualified Data.Dependent.Map as M
 import qualified Data.Comp as C
@@ -34,6 +38,13 @@ import qualified Data.Comp.Dag as C
 import qualified Data.IntMap as I
 import Data.Kind
 import Unsafe.Coerce
+
+--import Diagrams.Prelude
+--import Diagrams.Backend.SVG.CmdLine
+--import Diagrams.TwoD.Arrow
+
+import Data.GraphViz
+import Data.GraphViz.Types.Canonical
 
 pairEq :: (a :~: b) -> (a' :~: b') -> (a,a') :~: (b,b')
 pairEq Refl Refl = Refl
@@ -83,6 +94,31 @@ instance HFgeq Var where
                                      e `geq` f
     _ `hfgeq` _ = Nothing
 
+class HTraversable f => Graphable f where
+    nodeAttrs :: f a b -> Attributes
+    edgeAttrs :: f a b -> [Attributes]
+
+instance Graphable Val where
+    nodeAttrs (Val n) = [shape Octagon, toLabel n, bgColor Azure] 
+    edgeAttrs _ = []
+instance Graphable Pair where
+    nodeAttrs _ = [toLabel "Pair"]
+    edgeAttrs _ = [[toLabel "first"],[toLabel "second"]]
+instance Graphable Add where
+    nodeAttrs _ = [toLabel "+"]
+    edgeAttrs _ = [[arrowTo box], [arrowTo box]]
+instance Graphable Mult where
+    nodeAttrs _ = [toLabel "*"]
+    edgeAttrs _ = [[arrowTo vee], [arrowTo vee]]
+instance Graphable Var where
+    nodeAttrs (Let (Tag x) _ _) = [toLabel $ "Let x_" ++ show x]
+    nodeAttrs (Var (Tag x)) = [toLabel $ "x_" ++ show x]
+    edgeAttrs Let {} = [[toLabel "="],[toLabel "in"]]
+    edgeAttrs (Var _) = []
+instance (Graphable f, Graphable g) => Graphable (f :+: g) where
+    nodeAttrs = caseH nodeAttrs nodeAttrs
+    edgeAttrs = caseH edgeAttrs edgeAttrs
+
 hasLet :: (Var :<: f) => Dag' f i -> Bool
 hasLet Dag' {root', edges'} = isJust (proj @Var root') || (any isJust . fmap (\(_ S.:=> a) -> void $ proj @Var a) $ M.toList edges')
 
@@ -130,7 +166,7 @@ relabel Dag' {root', edges'} = Dag' r' (M.fromList e') $ length e' where
             if n `I.member` nodeMap then return $ Node (nodeMap I.! n) S.:=> hfmap (\(Node j) -> Node $ nodeMap I.! j) x
                                   else []
 
-type Sig = Val :+: Pair :+: Add :+: Mult :+: Var
+type Sig = Val :+: Pair :+: Add :+: Mult
 
 -- |ProductOfSums x y z w represents (x+y)*(z+w).
 data ProductOfSums a b where ProductOfSums :: a b -> a b -> a b -> a b -> ProductOfSums a b
@@ -160,3 +196,47 @@ instance (Val :<: f, Add :<: f, Mult :<: f) => Num (Term f Int) where
     (+) = iAdd
     (*) = iMult
 
+
+{-
+toDiagram :: forall f . (Drawable f, HFoldable f) => Dag' f :=> Diagram B
+toDiagram Dag' {root', edges', nodeCount'} = let r = text (opName root') # fontSizeL 0.2 # fc black <> circle 0.2 # fc (colourOf root') # named (Nothing :: Maybe Int)
+                                                 rootArrows :: Diagram B -> Diagram B
+                                                 rootArrows = hfoldl (\f (Node n) -> f . connectOutside (Nothing :: Maybe Int) (Just n)) id root'
+                                                 draw :: S.DSum Node (f Node) -> Diagram B
+                                                 draw (Node n S.:=> f) = text (opName f) # fontSizeL 0.2 # fc black <> circle 0.2 # fc (colourOf f) # named (Just n)
+                                                 nodes = atPoints (trailVertices . regPoly nodeCount' $ fromIntegral nodeCount'/5) . fmap draw $ M.toList edges'
+                                                 makeArrows :: S.DSum Node (f Node) -> Diagram B -> Diagram B
+                                                 makeArrows (Node m S.:=> g) = hfoldl (\f (Node n) -> f . connectOutside (Just m) (Just n)) id g
+                                                 arrows = foldl (.) id . map makeArrows $ M.toList edges'
+                                             in (r ||| nodes) # rootArrows # arrows
+
+toDot :: forall f . Graphable f=> Dag' f :=> String
+toDot Dag' {root', edges'} = let rootArrows = hfoldl (\s (Node n) -> s ++ "root" ++ " -> node_" ++ show n ++ ";\n") "" root'
+                                 nodes = (\(Node n S.:=> f) -> "node_" ++ show n ++ " [label=\"" ++ opName f ++ "\"];\n") =<< M.toList edges'
+                                 makeArrows (Node m S.:=> g) = hfoldl (\f (Node n) -> f ++ "node_" ++ show m ++ " -> " ++ "node_" ++ show n ++ ";\n") "" g
+                                 arrows = makeArrows =<< M.toList edges'
+                             in "digraph G {root [label=" ++ opName root' ++ "];\n" ++ nodes ++ rootArrows ++ arrows ++ "}"
+-}
+
+instance PrintDot (Maybe Int) where
+    unqtDot Nothing = unqtDot (0 :: Int)
+    unqtDot (Just n) = unqtDot $ (2*abs n) + if n<0 then 2 else 1
+
+toGraph :: forall f . Graphable f=> Dag' f :=> DotGraph (Maybe Int)
+toGraph Dag' {root', edges'} = let rootNode = DotNode {nodeID = Nothing, nodeAttributes = nodeAttrs root'}
+                                   rootArrows = zipWith (\attrs n -> DotEdge {fromNode = Nothing, toNode = Just n, edgeAttributes = attrs}) (edgeAttrs root') (hfoldr ((:) . getNode) [] root')
+                                   nodes = (\(Node n S.:=> f) -> DotNode {nodeID = Just n, nodeAttributes = nodeAttrs f}) <$> M.toList edges'
+                                   makeArrows (Node m S.:=> f) = zipWith (\attrs n -> DotEdge {fromNode = Just m, toNode = Just n, edgeAttributes = attrs}) (edgeAttrs f) (hfoldr ((:) . getNode) [] f)
+                                   arrows = makeArrows =<< M.toList edges'
+                                   statements = DotStmts {
+                                                           attrStmts = []
+                                                         , subGraphs = []
+                                                         , nodeStmts = rootNode:nodes
+                                                         , edgeStmts = rootArrows ++ arrows
+                                                         }
+                               in DotGraph {
+                                             strictGraph = False
+                                           , directedGraph = True
+                                           , graphID = Nothing
+                                           , graphStatements = statements
+                                           }
